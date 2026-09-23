@@ -22,6 +22,7 @@ import org.fcitx.fcitx5.android.input.keyboard.SpaceLongPressBehavior
 import org.fcitx.fcitx5.android.input.keyboard.SwipeSymbolDirection
 import org.fcitx.fcitx5.android.input.picker.PickerWindow
 import org.fcitx.fcitx5.android.input.popup.EmojiModifier
+import org.fcitx.fcitx5.android.input.hardware.HardwareKeyboardProfileOverride
 import org.fcitx.fcitx5.android.utils.DeviceUtil
 import org.fcitx.fcitx5.android.utils.appContext
 import org.fcitx.fcitx5.android.utils.vibrator
@@ -55,6 +56,40 @@ class AppPrefs(private val sharedPreferences: SharedPreferences) {
             R.string.keyboard_height_percent_base,
             "keyboard_height_percent_base",
             KeyboardHeightPercentBase.DisplayMetrics
+        )
+        val showModifierIndicatorsInStatusBar = switch(
+            R.string.show_modifier_indicators_in_status_bar,
+            "show_modifier_indicators_in_status_bar",
+            false
+        )
+        val enableDoubleTapModifierLock = switch(
+            R.string.enable_double_tap_modifier_lock,
+            "enable_double_tap_modifier_lock",
+            true
+        )
+        val modifierDoubleTapWindowMilliseconds = int(
+            R.string.modifier_double_tap_window,
+            "modifier_double_tap_window_milliseconds",
+            300,
+            min = 150,
+            max = 1000,
+            unit = "ms",
+            step = 10
+        ) { enableDoubleTapModifierLock.getValue() }
+        val enableSymLayer = switch(
+            R.string.enable_sym_layer,
+            "enable_sym_layer",
+            true
+        )
+        val hardwareKeyboardProfile = enumList(
+            R.string.hardware_keyboard_profile,
+            "hardware_keyboard_profile",
+            HardwareKeyboardProfileOverride.Auto
+        )
+        val hardwareSpaceKeyLongPressBehavior = enumList(
+            R.string.hardware_space_long_press_behavior,
+            "hardware_space_long_press_behavior",
+            SpaceLongPressBehavior.None
         )
     }
 

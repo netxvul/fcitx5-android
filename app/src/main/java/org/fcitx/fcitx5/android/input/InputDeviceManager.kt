@@ -12,6 +12,7 @@ import android.view.inputmethod.EditorInfo
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.input.candidates.floating.FloatingCandidatesMode
 import org.fcitx.fcitx5.android.utils.isTypeNull
+import org.fcitx.fcitx5.android.utils.forceShowSelf
 
 class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
 
@@ -39,16 +40,19 @@ class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
         setupCandidatesViewEvents(isVirtual)
     }
 
+    private var hasHardwareKeyboard = false
+
     var isVirtualKeyboard = true
         private set(value) {
-            if (field == value) {
+            val visible = resolveVirtualKeyboardVisibility(hasHardwareKeyboard, symKeyboardPinned, value)
+            if (field == visible) {
                 return
             }
-            field = value
-            setupViewEvents(value)
+            field = visible
+            setupViewEvents(visible)
             // fire change AFTER updating InputView(s),
             // make the view(s) ready for incoming events during `onChange`
-            onChange(value)
+            onChange(visible)
         }
 
     fun setInputView(inputView: InputView) {
@@ -63,11 +67,17 @@ class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
 
     private var startedInputView = false
     private var isNullInputType = true
+    /** True while a physical SYM key explicitly keeps the picker on screen. */
+    private var symKeyboardPinned = false
 
     private var candidatesViewMode by AppPrefs.getInstance().candidates.mode
 
-    fun notifyOnStartInput(attribute: EditorInfo) {
+    fun notifyOnStartInput(attribute: EditorInfo, hasHardwareKeyboard: Boolean) {
         isNullInputType = attribute.isTypeNull()
+        this.hasHardwareKeyboard = hasHardwareKeyboard
+        // Re-evaluate before attaching views: a previous SYM session must not
+        // make the normal software keyboard appear in the next editor.
+        isVirtualKeyboard = isVirtualKeyboard
     }
 
     /**
@@ -76,10 +86,14 @@ class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
     fun evaluateOnStartInputView(info: EditorInfo, service: FcitxInputMethodService): Boolean {
         startedInputView = true
         isNullInputType = info.isTypeNull()
-        isVirtualKeyboard = when (candidatesViewMode) {
-            FloatingCandidatesMode.SystemDefault -> service.superEvaluateInputViewShown()
-            FloatingCandidatesMode.InputDevice -> isVirtualKeyboard
-            FloatingCandidatesMode.Disabled -> true
+        if (symKeyboardPinned) {
+            isVirtualKeyboard = true
+        } else {
+            isVirtualKeyboard = when (candidatesViewMode) {
+                FloatingCandidatesMode.SystemDefault -> service.superEvaluateInputViewShown()
+                FloatingCandidatesMode.InputDevice -> isVirtualKeyboard
+                FloatingCandidatesMode.Disabled -> true
+            }
         }
         return isVirtualKeyboard
     }
@@ -108,6 +122,7 @@ class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
     }
 
     private fun evaluateOnKeyDownInner(service: FcitxInputMethodService) {
+        if (symKeyboardPinned) return
         isVirtualKeyboard = when (candidatesViewMode) {
             FloatingCandidatesMode.SystemDefault -> service.superEvaluateInputViewShown()
             FloatingCandidatesMode.InputDevice -> false
@@ -117,6 +132,7 @@ class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
 
     fun evaluateOnViewClicked(service: FcitxInputMethodService) {
         if (!startedInputView) return
+        if (symKeyboardPinned) return
         isVirtualKeyboard = when (candidatesViewMode) {
             FloatingCandidatesMode.SystemDefault -> service.superEvaluateInputViewShown()
             else -> true
@@ -125,6 +141,7 @@ class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
 
     fun evaluateOnUpdateEditorToolType(toolType: Int, service: FcitxInputMethodService) {
         if (!startedInputView) return
+        if (symKeyboardPinned) return
         isVirtualKeyboard = when (candidatesViewMode) {
             FloatingCandidatesMode.SystemDefault -> service.superEvaluateInputViewShown()
             FloatingCandidatesMode.InputDevice ->
@@ -153,5 +170,32 @@ class InputDeviceManager(private val onChange: (Boolean) -> Unit) {
 
     fun onFinishInputView() {
         startedInputView = false
+        if (symKeyboardPinned) hideVirtualKeyboardForSym()
+    }
+
+    /** Show the IME surface when a physical SYM key explicitly requests it. */
+    fun showVirtualKeyboardForSym(service: FcitxInputMethodService) {
+        symKeyboardPinned = true
+        isVirtualKeyboard = true
+        service.forceShowSelf()
+    }
+
+    /** Return to the physical-keyboard presentation after closing the SYM picker. */
+    fun hideVirtualKeyboardForSym() {
+        symKeyboardPinned = false
+        isVirtualKeyboard = false
+    }
+
+    /** Releases the SYM pin when the editor itself is changing. */
+    fun releaseSymKeyboardPin() {
+        symKeyboardPinned = false
+    }
+
+    companion object {
+        fun resolveVirtualKeyboardVisibility(
+            hasHardwareKeyboard: Boolean,
+            symModeActive: Boolean,
+            requestedVisibility: Boolean
+        ): Boolean = symModeActive || (!hasHardwareKeyboard && requestedVisibility)
     }
 }

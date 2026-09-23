@@ -21,6 +21,7 @@ import org.fcitx.fcitx5.android.input.broadcast.ReturnKeyDrawableComponent
 import org.fcitx.fcitx5.android.input.dependency.fcitx
 import org.fcitx.fcitx5.android.input.dependency.inputMethodService
 import org.fcitx.fcitx5.android.input.dependency.theme
+import org.fcitx.fcitx5.android.input.hardware.ModifierState
 import org.fcitx.fcitx5.android.input.picker.PickerWindow
 import org.fcitx.fcitx5.android.input.popup.PopupActionListener
 import org.fcitx.fcitx5.android.input.popup.PopupComponent
@@ -113,6 +114,14 @@ class KeyboardWindow : InputWindow.SimpleInputWindow<KeyboardWindow>(), Essentia
             it.onAttach()
             it.onReturnDrawableUpdate(returnKeyDrawable.resourceId)
             it.onInputMethodUpdate(fcitx.runImmediately { inputMethodEntryCached })
+        }
+    }
+
+    fun updateHardwareModifiers(state: ModifierState?) {
+        (keyboards[TextKeyboard.Name] as TextKeyboard).apply {
+            onHardwareShiftAction = if (state == null) null else service::onScreenShift
+            onHardwareShiftConsumed = if (state == null) null else service::onScreenShiftConsumed
+            updateHardwareModifiers(state)
         }
     }
 

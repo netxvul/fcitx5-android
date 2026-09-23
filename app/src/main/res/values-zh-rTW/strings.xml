@@ -316,4 +316,6 @@
     <string name="emoji_skin_tone_type_6">🏿 深膚色 (Type-6)</string>
     <string name="hide_unsupported_emojis">隱藏不支援的表情</string>
     <string name="preferred_voice_input">首選語音輸入</string>
+    <string name="hardware_space_long_press_behavior">實體空格鍵長按行為</string>
+    <string name="modifier_double_tap_window">修飾鍵雙擊判定時間</string>
 </resources>

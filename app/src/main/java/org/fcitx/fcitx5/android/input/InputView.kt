@@ -31,12 +31,14 @@ import org.fcitx.fcitx5.android.input.broadcast.PreeditEmptyStateComponent
 import org.fcitx.fcitx5.android.input.broadcast.PunctuationComponent
 import org.fcitx.fcitx5.android.input.broadcast.ReturnKeyDrawableComponent
 import org.fcitx.fcitx5.android.input.candidates.horizontal.HorizontalCandidateComponent
+import org.fcitx.fcitx5.android.input.hardware.ModifierState
 import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener
 import org.fcitx.fcitx5.android.input.keyboard.KeyboardHeightPercentBase.DisplayMetrics
 import org.fcitx.fcitx5.android.input.keyboard.KeyboardHeightPercentBase.RealSize
 import org.fcitx.fcitx5.android.input.keyboard.KeyboardWindow
 import org.fcitx.fcitx5.android.input.picker.emojiPicker
 import org.fcitx.fcitx5.android.input.picker.emoticonPicker
+import org.fcitx.fcitx5.android.input.picker.PickerWindow
 import org.fcitx.fcitx5.android.input.picker.symbolPicker
 import org.fcitx.fcitx5.android.input.popup.PopupComponent
 import org.fcitx.fcitx5.android.input.preedit.PreeditComponent
@@ -328,12 +330,48 @@ class InputView(
     /**
      * called when [InputView] is about to show, or restart
      */
-    fun startInput(info: EditorInfo, capFlags: CapabilityFlags, restarting: Boolean = false) {
+    fun startInput(
+        info: EditorInfo,
+        capFlags: CapabilityFlags,
+        restarting: Boolean = false,
+        showSymbolPicker: Boolean = false
+    ) {
         broadcaster.onStartInput(info, capFlags)
         returnKeyDrawable.updateDrawableOnEditorInfo(info)
-        if (focusChangeResetKeyboard || !restarting) {
+        if (showSymbolPicker) {
+            // Restore SYM directly, without first attaching the 26-key layout.
+            showSymbolPicker()
+        } else if (focusChangeResetKeyboard || !restarting) {
             windowManager.attachWindow(KeyboardWindow)
         }
+    }
+
+    fun updateHardwareModifiers(state: ModifierState?) {
+        keyboardWindow.updateHardwareModifiers(state)
+    }
+
+    /** Shows the symbol picker without toggling it away when it is already visible. */
+    fun showSymbolPicker() {
+        val picker = windowManager.getEssentialWindow(PickerWindow.Key.Symbol)
+        if (!windowManager.isAttached(picker)) {
+            windowManager.attachWindow(PickerWindow.Key.Symbol)
+        }
+    }
+
+    /** Hides the symbol picker and returns to the normal keyboard window. */
+    fun hideSymbolPicker() {
+        val picker = windowManager.getEssentialWindow(PickerWindow.Key.Symbol)
+        if (windowManager.isAttached(picker)) windowManager.attachWindow(KeyboardWindow)
+    }
+
+    /** Toggle the symbol picker from a physical SYM key. */
+    fun toggleSymbolPicker() {
+        val picker = windowManager.getEssentialWindow(PickerWindow.Key.Symbol)
+        if (windowManager.isAttached(picker)) hideSymbolPicker() else showSymbolPicker()
+    }
+
+    fun setSymbolPageChangedListener(listener: (List<String>) -> Unit) {
+        symbolPicker.onPageChanged = listener
     }
 
     override fun onStartHandleFcitxEvent() {

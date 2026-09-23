@@ -10,6 +10,7 @@
     <string name="global_options">Global Options</string>
     <string name="behavior">Behavior</string>
     <string name="advanced">Advanced</string>
+    <string name="modifier_double_tap_window">Modifier double-tap window</string>
     <string name="ignore_sys_cursor">Ignore system cursor position</string>
     <string name="hide_key_config">Hide hotkey configurations</string>
     <string name="_not_available_">(Not Available)</string>
@@ -319,6 +320,16 @@
     <string name="preferred_voice_input">Preferred voice input</string>
     <string name="edit_text_playground">EditText Playground</string>
     <string name="keyboard_height_percent_base">Keyboard height percent base</string>
+    <string name="show_modifier_indicators_in_status_bar">Show modifier hints in Android status bar</string>
+    <string name="enable_double_tap_modifier_lock">Enable double-tap modifier lock</string>
+    <string name="enable_sym_layer">Enable SYM symbol layer</string>
+    <string name="hardware_keyboard_profile">Hardware keyboard profile</string>
+    <string name="hardware_space_long_press_behavior">Hardware Space key long press behavior</string>
+    <string name="hardware_keyboard_profile_auto">Automatic</string>
+    <string name="hardware_keyboard_profile_q25">BlackBerry Q25</string>
+    <string name="hardware_keyboard_profile_key2">BlackBerry Key2</string>
+    <string name="hardware_keyboard_profile_titan2">Unihertz Titan 2</string>
+    <string name="hardware_keyboard_profile_titan2_elite">Unihertz Titan 2 Elite</string>
     <string name="display_metrics">Display metrics (Resources.getDisplayMetrics)</string>
     <string name="real_size">Real size (Display.getRealSize)</string>
 </resources>

@@ -50,6 +50,9 @@ class PickerWindow(
     private lateinit var pickerLayout: PickerLayout
     private lateinit var pickerPagesAdapter: PickerPagesAdapter
 
+    /** Called whenever the visible page changes, including a horizontal swipe. */
+    var onPageChanged: ((List<String>) -> Unit)? = null
+
     override fun enterAnimation(lastWindow: InputWindow): Transition? = null
 
     override fun exitAnimation(nextWindow: InputWindow): Transition? = null
@@ -80,6 +83,10 @@ class PickerWindow(
                 commonKeyActionListener.listener.onKeyAction(it, source)
             }
         }
+    }
+
+    private fun notifyPageChanged(position: Int) {
+        onPageChanged?.invoke(pickerPagesAdapter.getItemsOfPage(position))
     }
 
     private val popupActionListener: PopupActionListener by lazy {
@@ -138,6 +145,7 @@ class PickerWindow(
                 override fun onPageSelected(position: Int) {
                     tabsUi.activateTab(pickerPagesAdapter.getCategoryIndexOfPage(position))
                     popup.dismissAll()
+                    notifyPageChanged(position)
                 }
             })
         }
@@ -148,6 +156,7 @@ class PickerWindow(
     override fun onAttached() {
         pickerLayout.embeddedKeyboard.also {
             pickerPagesAdapter.refreshIfNeeded()
+            notifyPageChanged(pickerLayout.pager.currentItem)
             it.onReturnDrawableUpdate(returnKeyDrawable.resourceId)
             it.keyActionListener = keyActionListener
         }

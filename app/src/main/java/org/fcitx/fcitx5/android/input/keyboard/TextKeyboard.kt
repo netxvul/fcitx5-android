@@ -16,6 +16,7 @@ import org.fcitx.fcitx5.android.core.KeyStates
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
 import org.fcitx.fcitx5.android.data.theme.Theme
+import org.fcitx.fcitx5.android.input.hardware.ModifierState
 import org.fcitx.fcitx5.android.input.popup.PopupAction
 import splitties.views.imageResource
 
@@ -102,9 +103,35 @@ class TextKeyboard(
     }
 
     private var capsState: CapsState = CapsState.None
+    private var hardwareModifiers: ModifierState? = null
+    var onHardwareShiftAction: ((Boolean) -> Unit)? = null
+    var onHardwareShiftConsumed: (() -> Unit)? = null
+
+    private val effectiveCaps: CapsState
+        get() = hardwareModifiers?.let {
+            when {
+                it.capsLock || it.shiftLatched -> CapsState.Lock
+                it.shiftPressed || it.shiftOneShot -> CapsState.Once
+                else -> CapsState.None
+            }
+        } ?: capsState
+
+    fun updateHardwareModifiers(state: ModifierState?) {
+        if (hardwareModifiers == state) return
+        hardwareModifiers = state
+        // Do not carry a separate soft-keyboard lock into a hardware session.
+        capsState = CapsState.None
+        updateCapsButtonIcon()
+        updateAlphabetKeys()
+    }
+
+    private fun consumeShift() {
+        if (hardwareModifiers != null) onHardwareShiftConsumed?.invoke()
+        else if (capsState == CapsState.Once) switchCapsState()
+    }
 
     private fun transformAlphabet(c: String): String {
-        return when (capsState) {
+        return when (effectiveCaps) {
             CapsState.None -> c.lowercase()
             else -> c.uppercase()
         }
@@ -118,7 +145,7 @@ class TextKeyboard(
         when (action) {
             is KeyAction.FcitxKeyAction -> when (source) {
                 KeyActionListener.Source.Keyboard -> {
-                    when (capsState) {
+                    when (effectiveCaps) {
                         CapsState.None -> {
                             transformed = action.copy(act = action.act.lowercase())
                         }
@@ -127,7 +154,7 @@ class TextKeyboard(
                                 act = action.act.uppercase(),
                                 states = KeyStates(KeyState.Virtual, KeyState.Shift)
                             )
-                            switchCapsState()
+                            consumeShift()
                         }
                         CapsState.Lock -> {
                             transformed = action.copy(
@@ -138,12 +165,16 @@ class TextKeyboard(
                     }
                 }
                 KeyActionListener.Source.Popup -> {
-                    if (capsState == CapsState.Once) {
-                        switchCapsState()
+                    if (hardwareModifiers != null) {
+                        transformed = action.copy(act = transformAlphabet(action.act))
                     }
+                    if (effectiveCaps == CapsState.Once) consumeShift()
                 }
             }
-            is KeyAction.CapsAction -> switchCapsState(action.lock)
+            is KeyAction.CapsAction -> {
+                if (hardwareModifiers != null) onHardwareShiftAction?.invoke(action.lock)
+                else switchCapsState(action.lock)
+            }
             else -> {}
         }
         super.onAction(transformed, source)
@@ -221,7 +252,7 @@ class TextKeyboard(
 
     private fun updateCapsButtonIcon() {
         caps.img.apply {
-            imageResource = when (capsState) {
+            imageResource = when (effectiveCaps) {
                 CapsState.None -> R.drawable.ic_capslock_none
                 CapsState.Once -> R.drawable.ic_capslock_once
                 CapsState.Lock -> R.drawable.ic_capslock_lock
@@ -238,7 +269,10 @@ class TextKeyboard(
             if (it.def !is KeyDef.Appearance.AltText) return
             it.mainText.text = it.def.displayText.let { str ->
                 if (str.length != 1 || !str[0].isLetter()) return@forEach
-                if (keepLettersUppercase) str.uppercase() else transformAlphabet(str)
+                // In a hardware session labels follow the same Shift state as
+                // the status icon, even if static uppercase labels were enabled.
+                if (hardwareModifiers == null && keepLettersUppercase) str.uppercase()
+                else transformAlphabet(str)
             }
         }
     }

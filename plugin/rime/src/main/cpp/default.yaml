@@ -45,6 +45,8 @@ key_binder:
       - key_bindings:/paging_with_minus_equal
       - key_bindings:/paging_with_comma_period
       - key_bindings:/numbered_mode_switch
+      # Keep Shift+space as a direct Chinese/English mode switch.
+      - key_bindings:/optimized_mode_switch
 
 recognizer:
   patterns:

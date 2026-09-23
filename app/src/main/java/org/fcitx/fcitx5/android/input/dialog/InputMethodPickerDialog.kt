@@ -6,6 +6,7 @@ package org.fcitx.fcitx5.android.input.dialog
 
 import android.app.AlertDialog
 import android.content.Context
+import android.view.ContextThemeWrapper
 import android.view.ViewGroup
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
@@ -27,14 +28,15 @@ object InputMethodPickerDialog {
         service: FcitxInputMethodService,
         context: Context
     ): AlertDialog {
+        val dialogContext = ContextThemeWrapper(context, R.style.Theme_DialogTheme)
         val entries = InputMethodData.resolve(fcitx, service)
         val enabledIM = fcitx.inputMethodEntryCached.uniqueName
         val enabledIndex = entries.indexOfFirst { it.uniqueName == enabledIM }
         val dividerIndex = entries.indexOfFirst { it.ime }
         lateinit var dialog: AlertDialog
-        dialog = AlertDialog.Builder(context)
+        dialog = AlertDialog.Builder(dialogContext)
             .setTitle(R.string.choose_input_method)
-            .setView(context.recyclerView {
+            .setView(dialogContext.recyclerView {
                 layoutParams = ViewGroup.LayoutParams(matchParent, wrapContent)
                 // add some padding because AlertDialog's `titleDividerNoCustom` won't show up...
                 // but why?
@@ -47,12 +49,17 @@ object InputMethodPickerDialog {
                     else service.lifecycleScope.launch { fcitx.activateIme(uniqueName) }
                     dialog.dismiss()
                 }
-                styledDrawable(android.R.attr.dividerHorizontal)?.let {
+                // Some device dialog themes leave dividerHorizontal unresolved;
+                // styledDrawable then receives resource ID 0 and throws. The
+                // divider is optional, so keep the picker usable without it.
+                runCatching {
+                    dialogContext.styledDrawable(android.R.attr.dividerHorizontal)
+                }.getOrNull()?.let {
                     addItemDecoration(SingleDividerDecoration(it, dividerIndex))
                 }
             })
             .setNeutralButton(R.string.input_methods) { _, _ ->
-                AppUtil.launchMainToInputMethodList(context)
+                AppUtil.launchMainToInputMethodList(dialogContext)
             }
             .create()
         return dialog

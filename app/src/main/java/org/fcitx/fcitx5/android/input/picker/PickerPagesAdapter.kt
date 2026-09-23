@@ -95,6 +95,9 @@ class PickerPagesAdapter(
         return categories[cat].second
     }
 
+    /** Returns the symbols currently rendered on a ViewPager page. */
+    fun getItemsOfPage(page: Int): List<String> = pages.getOrElse(page) { emptyList() }
+
     override fun getItemCount() = pages.size
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {

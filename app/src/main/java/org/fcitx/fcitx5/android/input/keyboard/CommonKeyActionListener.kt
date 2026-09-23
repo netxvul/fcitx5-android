@@ -9,7 +9,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import org.fcitx.fcitx5.android.core.FcitxAPI
-import org.fcitx.fcitx5.android.daemon.launchOnReady
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.input.broadcast.PreeditEmptyStateComponent
 import org.fcitx.fcitx5.android.input.candidates.horizontal.HorizontalCandidateComponent
@@ -17,7 +16,6 @@ import org.fcitx.fcitx5.android.input.dependency.context
 import org.fcitx.fcitx5.android.input.dependency.fcitx
 import org.fcitx.fcitx5.android.input.dependency.inputMethodService
 import org.fcitx.fcitx5.android.input.dialog.AddMoreInputMethodsPrompt
-import org.fcitx.fcitx5.android.input.dialog.InputMethodPickerDialog
 import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener.BackspaceSwipeState.Reset
 import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener.BackspaceSwipeState.Selection
 import org.fcitx.fcitx5.android.input.keyboard.CommonKeyActionListener.BackspaceSwipeState.Stopped
@@ -79,14 +77,6 @@ class CommonKeyActionListener :
         reset()
     }
 
-    private fun showInputMethodPicker() {
-        fcitx.launchOnReady {
-            service.lifecycleScope.launch {
-                service.showDialog(InputMethodPickerDialog.build(it, service, context))
-            }
-        }
-    }
-
     val listener by lazy {
         KeyActionListener { action, _ ->
             when (action) {
@@ -131,7 +121,7 @@ class CommonKeyActionListener :
                         }
                     }
                 }
-                is ShowInputMethodPickerAction -> showInputMethodPicker()
+                is ShowInputMethodPickerAction -> service.showInputMethodPicker()
                 is MoveSelectionAction -> {
                     when (backspaceSwipeState) {
                         Stopped -> {
@@ -171,16 +161,7 @@ class CommonKeyActionListener :
                     }
                 }
                 is SpaceLongPressAction -> {
-                    when (spaceKeyLongPressBehavior) {
-                        SpaceLongPressBehavior.None -> {}
-                        SpaceLongPressBehavior.Enumerate -> service.postFcitxJob {
-                            enumerateIme()
-                        }
-                        SpaceLongPressBehavior.ToggleActivate -> service.postFcitxJob {
-                            toggleIme()
-                        }
-                        SpaceLongPressBehavior.ShowPicker -> showInputMethodPicker()
-                    }
+                    service.performSpaceLongPress(spaceKeyLongPressBehavior)
                 }
                 else -> {}
             }

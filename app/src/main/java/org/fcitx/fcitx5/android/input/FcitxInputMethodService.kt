@@ -14,10 +14,13 @@ import android.graphics.Color
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.util.LruCache
 import android.util.Size
+import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
@@ -57,6 +60,7 @@ import org.fcitx.fcitx5.android.core.ScancodeMapping
 import org.fcitx.fcitx5.android.core.SubtypeManager
 import org.fcitx.fcitx5.android.daemon.FcitxConnection
 import org.fcitx.fcitx5.android.daemon.FcitxDaemon
+import org.fcitx.fcitx5.android.daemon.launchOnReady
 import org.fcitx.fcitx5.android.data.InputFeedbacks
 import org.fcitx.fcitx5.android.data.prefs.AppPrefs
 import org.fcitx.fcitx5.android.data.prefs.ManagedPreference
@@ -65,6 +69,19 @@ import org.fcitx.fcitx5.android.data.theme.Theme
 import org.fcitx.fcitx5.android.data.theme.ThemeManager
 import org.fcitx.fcitx5.android.input.cursor.CursorRange
 import org.fcitx.fcitx5.android.input.cursor.CursorTracker
+import org.fcitx.fcitx5.android.input.dialog.InputMethodPickerDialog
+import org.fcitx.fcitx5.android.input.hardware.HardwareKeyNormalizer
+import org.fcitx.fcitx5.android.input.hardware.HardwareKeyboardModel
+import org.fcitx.fcitx5.android.input.hardware.HardwareKeyboardProfileOverride
+import org.fcitx.fcitx5.android.input.hardware.HardwareKeyboardProfiles
+import org.fcitx.fcitx5.android.input.hardware.HardwareSpaceLongPressController
+import org.fcitx.fcitx5.android.input.hardware.ModifierLockController
+import org.fcitx.fcitx5.android.input.hardware.ModifierState
+import org.fcitx.fcitx5.android.input.hardware.ModifierStateTracker
+import org.fcitx.fcitx5.android.input.hardware.RimeModifierRouter
+import org.fcitx.fcitx5.android.input.hardware.SymModeController
+import org.fcitx.fcitx5.android.input.hardware.SystemStatusIconController
+import org.fcitx.fcitx5.android.input.keyboard.SpaceLongPressBehavior
 import org.fcitx.fcitx5.android.utils.InputMethodUtil
 import org.fcitx.fcitx5.android.utils.alpha
 import org.fcitx.fcitx5.android.utils.forceShowSelf
@@ -102,6 +119,55 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     private var inputView: InputView? = null
     private var candidatesView: CandidatesView? = null
 
+    private val hardwareKeyNormalizer = HardwareKeyNormalizer()
+    private val modifierStateTracker = ModifierStateTracker()
+    private val modifierLockController = ModifierLockController()
+    @Volatile
+    private var activeInputMethodIsRime = false
+    private val symModeController = SymModeController(
+        toggleSymbolPage = { pageOpen ->
+            if (pageOpen) openSymPicker() else closeSymPicker()
+        },
+        commitText = { text, connection -> connection?.commitText(text, 1) }
+    )
+    private val systemStatusIconController = SystemStatusIconController(
+        showIcon = { showStatusIcon(it) },
+        hideIcon = { hideStatusIcon() }
+    )
+    private val hardwareSpaceLongPressHandler = Handler(Looper.getMainLooper())
+    private val hardwareSpaceLongPressController = HardwareSpaceLongPressController(
+        scheduler = object : HardwareSpaceLongPressController.Scheduler {
+            override fun postDelayed(task: Runnable, delayMs: Long) {
+                hardwareSpaceLongPressHandler.postDelayed(task, delayMs)
+            }
+
+            override fun remove(task: Runnable) {
+                hardwareSpaceLongPressHandler.removeCallbacks(task)
+            }
+        },
+        delayMs = { prefs.keyboard.longPressDelay.getValue().toLong() },
+        onLongPress = { performSpaceLongPress(prefs.advanced.hardwareSpaceKeyLongPressBehavior.getValue()) },
+        dispatchTap = { event -> routeHardwareKeyEvent(event, bypassSpaceLongPress = true) }
+    )
+    private val rimeModifierHandler = Handler(Looper.getMainLooper())
+    private val rimeModifierRouter = RimeModifierRouter(
+        modifierLockController = modifierLockController,
+        scheduler = object : RimeModifierRouter.Scheduler {
+            override fun postDelayed(task: Runnable, delayMs: Long) {
+                rimeModifierHandler.postDelayed(task, delayMs)
+            }
+
+            override fun remove(task: Runnable) {
+                rimeModifierHandler.removeCallbacks(task)
+            }
+        },
+        delayMs = { prefs.advanced.modifierDoubleTapWindowMilliseconds.getValue().toLong() },
+        dispatchRaw = { event ->
+            forwardKeyEvent(event, alreadyNormalized = true, indicatorEvent = event)
+        },
+        onStateChanged = { refreshModifierPresentation() }
+    )
+
     private val navbarMgr = NavigationBarManager()
     private val inputDeviceMgr = InputDeviceManager { isVirtualKeyboard ->
         postFcitxJob {
@@ -109,9 +175,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         }
         currentInputConnection?.monitorCursorAnchor(!isVirtualKeyboard)
         if (isVirtualKeyboard) {
-            hideStatusIcon()
+            systemStatusIconController.setPhysicalKeyboard(false)
         } else {
-            showStatusIcon(StatusIconMapping.fromEntry(fcitx.runImmediately { inputMethodEntryCached }))
+            systemStatusIconController.setPhysicalKeyboard(true)
+            systemStatusIconController.setBaseIcon(
+                StatusIconMapping.fromEntry(fcitx.runImmediately { inputMethodEntryCached })
+            )
         }
         window.window?.let {
             navbarMgr.evaluate(it, isVirtualKeyboard)
@@ -147,11 +216,34 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         prefs.advanced.ignoreSystemWindowInsets,
     )
 
+    private val modifierIndicatorPreferenceListener =
+        ManagedPreference.OnChangeListener<Boolean> { _, enabled ->
+            systemStatusIconController.setModifierIndicatorsEnabled(enabled)
+        }
+
+    private val hardwareProfilePreferenceListener =
+        ManagedPreference.OnChangeListener<HardwareKeyboardProfileOverride> { _, _ ->
+            hardwareKeyNormalizer.reset()
+        }
+
+    private val modifierDoubleTapWindowListener = ManagedPreference.OnChangeListener<Int> { _, value ->
+        modifierLockController.setDoubleTapThresholdMs(value.toLong())
+        rimeModifierRouter.reset()
+    }
+
+    private val modifierLockPreferenceListener = ManagedPreference.OnChangeListener<Boolean> { _, _ ->
+        rimeModifierRouter.reset()
+        refreshModifierPresentation()
+    }
+
     private fun replaceInputView(theme: Theme): InputView {
         val newInputView = InputView(this, fcitx, theme)
         setInputView(newInputView)
         inputDeviceMgr.setInputView(newInputView)
+        bindSymPicker(newInputView)
         inputView = newInputView
+        refreshModifierPresentation()
+        if (symModeController.isPageOpen()) newInputView.showSymbolPicker()
         return newInputView
     }
 
@@ -170,6 +262,28 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         navbarMgr.evaluate(window.window!!, inputDeviceMgr.isVirtualKeyboard)
         replaceInputView(theme)
         replaceCandidateView(theme)
+    }
+
+    private fun bindSymPicker(view: InputView) {
+        view.setSymbolPageChangedListener { symbols ->
+            symModeController.updatePageSymbols(symbols)
+        }
+    }
+
+    private fun ensureSymPickerVisible() {
+        if (!symModeController.isPageOpen()) return
+        inputDeviceMgr.showVirtualKeyboardForSym(this)
+        if (inputView == null) replaceInputViews(ThemeManager.activeTheme)
+        inputView?.showSymbolPicker()
+    }
+
+    private fun openSymPicker() {
+        ensureSymPickerVisible()
+    }
+
+    private fun closeSymPicker() {
+        inputView?.hideSymbolPicker()
+        inputDeviceMgr.hideVirtualKeyboardForSym()
     }
 
     @Keep
@@ -218,6 +332,24 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         }
         prefs.candidates.registerOnChangeListener(recreateCandidatesViewListener)
         ThemeManager.addOnChangedListener(onThemeChangeListener)
+        prefs.advanced.showModifierIndicatorsInStatusBar.registerOnChangeListener(
+            modifierIndicatorPreferenceListener
+        )
+        prefs.advanced.hardwareKeyboardProfile.registerOnChangeListener(
+            hardwareProfilePreferenceListener
+        )
+        prefs.advanced.modifierDoubleTapWindowMilliseconds.registerOnChangeListener(
+            modifierDoubleTapWindowListener
+        )
+        prefs.advanced.enableDoubleTapModifierLock.registerOnChangeListener(
+            modifierLockPreferenceListener
+        )
+        modifierLockController.setDoubleTapThresholdMs(
+            prefs.advanced.modifierDoubleTapWindowMilliseconds.getValue().toLong()
+        )
+        systemStatusIconController.setModifierIndicatorsEnabled(
+            prefs.advanced.showModifierIndicatorsInStatusBar.getValue()
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             postFcitxJob {
                 SubtypeManager.syncWith(enabledIme())
@@ -311,6 +443,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 handleDeleteSurrounding(before, after)
             }
             is FcitxEvent.IMChangeEvent -> {
+                val inputMethodIsRime = event.data.addon == "rime" ||
+                    event.data.uniqueName == "rime"
+                if (inputMethodIsRime != activeInputMethodIsRime) {
+                    rimeModifierRouter.reset()
+                }
+                activeInputMethodIsRime = inputMethodIsRime
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     val im = event.data.uniqueName
                     val subtype = SubtypeManager.subtypeOf(im) ?: return
@@ -319,7 +457,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                     switchInputMethod(InputMethodUtil.componentName, subtype)
                 }
                 if (inputDeviceMgr.evaluateOnInputMethodActivate()) {
-                    showStatusIcon(StatusIconMapping.fromEntry(event.data))
+                    systemStatusIconController.setBaseIcon(StatusIconMapping.fromEntry(event.data))
                 }
             }
             is FcitxEvent.SwitchInputMethodEvent -> {
@@ -624,22 +762,163 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     override fun onEvaluateFullscreenMode() = false
 
-    private fun forwardKeyEvent(event: KeyEvent): Boolean {
+    private fun forwardKeyEvent(
+        event: KeyEvent,
+        alreadyNormalized: Boolean = false,
+        indicatorEvent: KeyEvent = event
+    ): Boolean {
+        val normalizedEvent = if (alreadyNormalized) {
+            event
+        } else {
+            hardwareKeyNormalizer.normalize(
+                keyCode = event.keyCode,
+                event = event,
+                profile = activeHardwareKeyboardProfile()
+            ).event
+        }
+        updateModifierStatus(indicatorEvent)
+
         // reason to use a self increment index rather than timestamp:
         // KeyUp and KeyDown events actually can happen on the same time
         val timestamp = cachedKeyEventIndex++
-        cachedKeyEvents.put(timestamp, event)
-        val sym = KeySym.fromKeyEvent(event)
+        cachedKeyEvents.put(timestamp, normalizedEvent)
+        val sym = KeySym.fromKeyEvent(normalizedEvent)
         if (sym != null) {
-            val states = KeyStates.fromKeyEvent(event)
-            val up = event.action == KeyEvent.ACTION_UP
+            val states = KeyStates.fromKeyEvent(normalizedEvent)
+            val up = normalizedEvent.action == KeyEvent.ACTION_UP
             postFcitxJob {
-                sendKey(sym, states, event.scanCode, up, timestamp)
+                sendKey(sym, states, normalizedEvent.scanCode, up, timestamp)
             }
             return true
         }
         Timber.d("Skipped KeyEvent: $event")
         return false
+    }
+
+    private fun updateModifierStatus(indicatorEvent: KeyEvent) {
+        if (indicatorEvent.action == KeyEvent.ACTION_UP) {
+            modifierStateTracker.onKeyUp(indicatorEvent)
+        } else {
+            modifierStateTracker.onKeyDown(indicatorEvent)
+        }
+        refreshModifierPresentation()
+    }
+
+    private fun effectiveModifierState(): ModifierState {
+        val physical = modifierStateTracker.snapshot()
+        val locked = modifierLockController.snapshot().toModifierState()
+        return locked.copy(
+            shiftPressed = physical.shiftPressed || locked.shiftPressed,
+            ctrlPressed = physical.ctrlPressed || locked.ctrlPressed,
+            altPressed = physical.altPressed || locked.altPressed,
+            capsLock = physical.capsLock,
+            symPressed = physical.symPressed || symModeController.isPageOpen()
+        )
+    }
+
+    private fun refreshModifierPresentation() {
+        val state = effectiveModifierState()
+        systemStatusIconController.setModifierState(state)
+        inputView?.updateHardwareModifiers(
+            state.takeIf { hasHardwareKeyboard() && prefs.advanced.enableDoubleTapModifierLock.getValue() }
+        )
+    }
+
+    private fun refreshActiveInputMethodPolicy() {
+        val inputMethodIsRime = runCatching {
+            fcitx.runImmediately {
+                inputMethodEntryCached.addon == "rime" || inputMethodEntryCached.uniqueName == "rime"
+            }
+        }.getOrDefault(activeInputMethodIsRime)
+        if (inputMethodIsRime != activeInputMethodIsRime) {
+            rimeModifierRouter.reset()
+        }
+        activeInputMethodIsRime = inputMethodIsRime
+    }
+
+    fun onScreenShift(lock: Boolean) {
+        modifierLockController.toggleShiftFromScreen(lock)
+        refreshModifierPresentation()
+    }
+
+    fun onScreenShiftConsumed() {
+        modifierLockController.consumeShiftFromScreen()
+        refreshModifierPresentation()
+    }
+
+    private fun routeHardwareKeyEvent(
+        event: KeyEvent,
+        bypassSpaceLongPress: Boolean = false
+    ): Boolean {
+        val normalized = hardwareKeyNormalizer.normalize(
+            keyCode = event.keyCode,
+            event = event,
+            profile = activeHardwareKeyboardProfile()
+        ).event
+        if (!bypassSpaceLongPress && shouldHandleSpaceLongPress(normalized)) {
+            if (hardwareSpaceLongPressController.handle(normalized)) return true
+        }
+        if (normalized.action == KeyEvent.ACTION_DOWN && isHardwareModifier(normalized.keyCode)) {
+            // SYM and the ordinary modifier layer are mutually exclusive. A
+            // modifier pressed from the picker returns to the physical mode
+            // before the modifier controller consumes the event.
+            symModeController.switchToModifierMode()
+        } else if (
+            normalized.action == KeyEvent.ACTION_DOWN &&
+            normalized.keyCode == KeyEvent.KEYCODE_SYM &&
+            modifierLockController.hasActiveModifier()
+        ) {
+            // Starting SYM cancels a previously latched Ctrl/Shift/Alt mode.
+            modifierLockController.reset()
+            modifierStateTracker.reset()
+            refreshModifierPresentation()
+        }
+        val symResult = symModeController.handle(
+            normalized,
+            currentInputConnection,
+            prefs.advanced.enableSymLayer.getValue()
+        )
+        if (symResult.consume) {
+            updateModifierStatus(normalized)
+            return true
+        }
+        val modifierResult = if (
+            activeInputMethodIsRime && prefs.advanced.enableDoubleTapModifierLock.getValue()
+        ) {
+            rimeModifierRouter.handle(normalized)
+        } else {
+            modifierLockController.handle(
+                normalized,
+                prefs.advanced.enableDoubleTapModifierLock.getValue()
+            )
+        }
+        if (modifierResult.consume) {
+            updateModifierStatus(normalized)
+            return true
+        }
+        return forwardKeyEvent(
+            modifierResult.event,
+            alreadyNormalized = true,
+            indicatorEvent = normalized
+        )
+    }
+
+    private fun shouldHandleSpaceLongPress(event: KeyEvent): Boolean {
+        if (event.keyCode != KeyEvent.KEYCODE_SPACE) return false
+        val modifierMask = KeyEvent.META_SHIFT_ON or KeyEvent.META_CTRL_ON or
+            KeyEvent.META_ALT_ON or KeyEvent.META_META_ON
+        if (event.metaState and modifierMask != 0) return false
+        val physical = modifierStateTracker.snapshot()
+        if (physical.shiftPressed || physical.ctrlPressed || physical.altPressed) return false
+        val locked = modifierLockController.snapshot()
+        return !locked.shiftActive && !locked.ctrlActive && !locked.altActive
+    }
+
+    private fun isHardwareModifier(keyCode: Int): Boolean = when (keyCode) {
+        KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT,
+        KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_CTRL_RIGHT,
+        KeyEvent.KEYCODE_ALT_LEFT, KeyEvent.KEYCODE_ALT_RIGHT -> true
+        else -> false
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -650,12 +929,33 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
             }
             forceShowSelf()
         }
-        return forwardKeyEvent(event) || super.onKeyDown(keyCode, event)
+        return routeHardwareKeyEvent(event) || super.onKeyDown(keyCode, event)
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        return forwardKeyEvent(event) || super.onKeyUp(keyCode, event)
+        return routeHardwareKeyEvent(event) || super.onKeyUp(keyCode, event)
     }
+
+    private fun hasHardwareKeyboard(): Boolean =
+        activeHardwareKeyboardProfile().model !in setOf(
+            HardwareKeyboardModel.Auto, HardwareKeyboardModel.Unknown
+        ) || resources.configuration.keyboard == Configuration.KEYBOARD_QWERTY ||
+            InputDevice.getDeviceIds().any { id ->
+                InputDevice.getDevice(id)?.let {
+                    !it.isVirtual && it.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC
+                } == true
+            }
+
+    private fun activeHardwareKeyboardProfile() = HardwareKeyboardProfiles.resolve(
+        HardwareKeyboardProfiles.current(),
+        when (prefs.advanced.hardwareKeyboardProfile.getValue()) {
+            HardwareKeyboardProfileOverride.Auto -> HardwareKeyboardModel.Auto
+            HardwareKeyboardProfileOverride.Q25 -> HardwareKeyboardModel.Q25
+            HardwareKeyboardProfileOverride.Key2 -> HardwareKeyboardModel.Key2
+            HardwareKeyboardProfileOverride.Titan2 -> HardwareKeyboardModel.Titan2
+            HardwareKeyboardProfileOverride.Titan2Elite -> HardwareKeyboardModel.Titan2Elite
+        }
+    )
 
     // Added in API level 14, deprecated in 29
     // it's needed because editors still use it even on API 36
@@ -725,6 +1025,17 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
+        hardwareSpaceLongPressController.reset()
+        refreshActiveInputMethodPolicy()
+        if (!restarting) {
+            rimeModifierRouter.reset()
+            modifierLockController.reset()
+            modifierStateTracker.reset()
+            symModeController.close()
+            inputDeviceMgr.releaseSymKeyboardPin()
+        }
+        // Restarting the same editor must not drop a held or locked Shift.
+        refreshModifierPresentation()
         // update selection as soon as possible
         // sometimes when restarting input, onUpdateSelection happens before onStartInput, and
         // initialSel{Start,End} is outdated. but it's the client app's responsibility to send
@@ -734,7 +1045,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         val flags = CapabilityFlags.fromEditorInfo(attribute)
         capabilityFlags = flags
         // EditorInfo may change between onStartInput and onStartInputView
-        inputDeviceMgr.notifyOnStartInput(attribute)
+        inputDeviceMgr.notifyOnStartInput(attribute, hasHardwareKeyboard())
         Timber.d("onStartInput: initialSel=${selection.current}, restarting=$restarting")
         val isNullType = attribute.isTypeNull()
         // wait until InputContext created/activated
@@ -763,7 +1074,12 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         if (inputDeviceMgr.evaluateOnStartInputView(info, this)) {
             // because onStartInputView will always be called after onStartInput,
             // editorInfo and capFlags should be up-to-date
-            inputView?.startInput(info, capabilityFlags, restarting)
+            inputView?.startInput(
+                info,
+                capabilityFlags,
+                restarting,
+                showSymbolPicker = symModeController.isPageOpen()
+            )
         } else {
             if (currentInputConnection?.monitorCursorAnchor() != true) {
                 if (!decorLocationUpdated) {
@@ -773,7 +1089,9 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
                 // support monitoring CursorAnchorInfo
                 candidatesView?.updateCursorAnchor(contentSize)
             }
-            showStatusIcon(StatusIconMapping.fromEntry(fcitx.runImmediately { inputMethodEntryCached }))
+            systemStatusIconController.setBaseIcon(
+                StatusIconMapping.fromEntry(fcitx.runImmediately { inputMethodEntryCached })
+            )
         }
     }
 
@@ -1049,6 +1367,7 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         Timber.d("onFinishInputView: finishingInput=$finishingInput")
+        hardwareSpaceLongPressController.reset()
         decorLocationUpdated = false
         inputDeviceMgr.onFinishInputView()
         currentInputConnection?.apply {
@@ -1059,12 +1378,20 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         postFcitxJob {
             focusOutIn()
         }
-        hideStatusIcon()
+        systemStatusIconController.clear()
+        rimeModifierRouter.reset()
+        rimeModifierHandler.removeCallbacksAndMessages(null)
+        modifierStateTracker.reset()
+        modifierLockController.reset()
+        symModeController.close()
+        inputView?.updateHardwareModifiers(null)
+        hardwareKeyNormalizer.reset()
         showingDialog?.dismiss()
     }
 
     override fun onFinishInput() {
         Timber.d("onFinishInput")
+        hardwareSpaceLongPressController.reset()
         postFcitxJob {
             focus(false)
         }
@@ -1084,11 +1411,32 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
     }
 
     override fun onDestroy() {
+        hardwareSpaceLongPressController.reset()
         recreateInputViewPrefs.forEach {
             it.unregisterOnChangeListener(recreateInputViewListener)
         }
         prefs.candidates.unregisterOnChangeListener(recreateCandidatesViewListener)
         ThemeManager.removeOnChangedListener(onThemeChangeListener)
+        prefs.advanced.showModifierIndicatorsInStatusBar.unregisterOnChangeListener(
+            modifierIndicatorPreferenceListener
+        )
+        prefs.advanced.hardwareKeyboardProfile.unregisterOnChangeListener(
+            hardwareProfilePreferenceListener
+        )
+        prefs.advanced.modifierDoubleTapWindowMilliseconds.unregisterOnChangeListener(
+            modifierDoubleTapWindowListener
+        )
+        prefs.advanced.enableDoubleTapModifierLock.unregisterOnChangeListener(
+            modifierLockPreferenceListener
+        )
+        systemStatusIconController.clear()
+        rimeModifierRouter.reset()
+        rimeModifierHandler.removeCallbacksAndMessages(null)
+        modifierStateTracker.reset()
+        modifierLockController.reset()
+        symModeController.close()
+        inputView?.updateHardwareModifiers(null)
+        hardwareKeyNormalizer.reset()
         super.onDestroy()
         // Fcitx might be used in super.onDestroy()
         FcitxDaemon.disconnect(javaClass.name)
@@ -1113,6 +1461,33 @@ class FcitxInputMethodService : LifecycleInputMethodService() {
         }
         dialog.show()
         showingDialog = dialog
+    }
+
+    fun showInputMethodPicker() {
+        fcitx.launchOnReady { api ->
+            lifecycleScope.launch {
+                showDialog(
+                    InputMethodPickerDialog.build(
+                        api,
+                        this@FcitxInputMethodService,
+                        inputView?.themedContext ?: this@FcitxInputMethodService
+                    )
+                )
+            }
+        }
+    }
+
+    fun performSpaceLongPress(behavior: SpaceLongPressBehavior) {
+        when (behavior) {
+            SpaceLongPressBehavior.None -> Unit
+            SpaceLongPressBehavior.Enumerate -> postFcitxJob {
+                enumerateIme()
+            }
+            SpaceLongPressBehavior.ToggleActivate -> postFcitxJob {
+                toggleIme()
+            }
+            SpaceLongPressBehavior.ShowPicker -> showInputMethodPicker()
+        }
     }
 
     @Suppress("ConstPropertyName")
